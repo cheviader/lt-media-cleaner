@@ -71,7 +71,7 @@ class LT_Media_Cleaner_Processor {
             'sizes'  => []
         ];
         
-        update_post_meta( $attachment_id, '_wp_attachment_metadata', $new_meta );
+        wp_update_attachment_metadata( $attachment_id, $new_meta );
         update_attached_file( $attachment_id, $new_filepath );
 
         if ( $file_path !== $new_filepath && file_exists( $file_path ) ) {
