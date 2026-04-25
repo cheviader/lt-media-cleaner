@@ -3,6 +3,7 @@
  * Plugin Name: LT Media Cleaner
  * Version: 0.1.0
  * Description: Clean, optimize, WebP encode and offload 13 years of media history.
+ * Author: Lalutotale
  */
 
 defined( 'ABSPATH' ) || exit;
