@@ -1,0 +1,19 @@
+# WordPress
+.env
+.DS_Store
+
+# Composer
+vendor/
+
+# Node
+node_modules/
+package-lock.json
+
+# Builds
+build/
+dist/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
