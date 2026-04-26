@@ -8,7 +8,9 @@ class LT_Media_Cleaner_Audit {
     }
 
     public static function verify_s3_url( $attachment_id, $s3_url ) {
-        if ( empty( $s3_url ) ) return;
+        if ( empty( $s3_url ) ) {
+            throw new Exception("LT_MC: L'URL S3 est vide pour l'image ID $attachment_id.");
+        }
 
         $response = wp_remote_head( $s3_url );
         $code = wp_remote_retrieve_response_code( $response );
@@ -16,7 +18,7 @@ class LT_Media_Cleaner_Audit {
         if ( $code === 200 ) {
             error_log( "LT_MC: [SUCCESS] S3 URL valide pour ID $attachment_id -> $s3_url" );
         } else {
-            error_log( "LT_MC: [ERROR] S3 URL brisée pour ID $attachment_id -> $s3_url (Code: $code)" );
+            throw new Exception("LT_MC: [ERROR] Échec QA : HTTP $code pour $s3_url (ID: $attachment_id)");
         }
     }
 
@@ -31,9 +33,8 @@ class LT_Media_Cleaner_Audit {
         ) );
 
         if ( ! empty( $posts ) ) {
-            foreach ( $posts as $p ) {
-                error_log( "LT_MC: [WARNING] URL locale orpheline détectée dans le post ID {$p->ID} ({$p->post_title})" );
-            }
+            $orphan_ids = implode(', ', array_map(function($p) { return $p->ID; }, $posts));
+            throw new Exception("LT_MC: [ERROR] URLs locales orphelines détectées dans les posts ID: $orphan_ids");
         } else {
             error_log( "LT_MC: [SUCCESS] Audit terminé pour $year-$month : Aucune URL locale résiduelle trouvée dans les posts publiés." );
         }
