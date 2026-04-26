@@ -22,11 +22,15 @@ class LT_Media_Cleaner_Processor {
         $meta = wp_get_attachment_metadata( $attachment_id );
         if ( ! empty( $meta['sizes'] ) ) {
             $upload_dir = wp_upload_dir();
-            $base_url = $upload_dir['basedir'] . '/' . dirname( $meta['file'] ) . '/';
+            $base_url = rtrim( $upload_dir['basedir'] . '/' . dirname( $meta['file'] ), '/' ) . '/';
             foreach ( $meta['sizes'] as $size => $size_info ) {
                 $thumb_path = $base_url . $size_info['file'];
                 if ( file_exists( $thumb_path ) ) {
                     unlink( $thumb_path );
+                }
+                // Nettoyage des vieux reliquats (ex: plugin WebP Express)
+                if ( file_exists( $thumb_path . '.webp' ) ) {
+                    unlink( $thumb_path . '.webp' );
                 }
             }
         }
@@ -72,8 +76,14 @@ class LT_Media_Cleaner_Processor {
         $metadata = wp_generate_attachment_metadata( $attachment_id, $new_filepath );
         wp_update_attachment_metadata( $attachment_id, $metadata );
 
-        if ( $file_path !== $new_filepath && file_exists( $file_path ) ) {
-            unlink( $file_path );
+        if ( $file_path !== $new_filepath ) {
+            if ( file_exists( $file_path ) ) {
+                unlink( $file_path );
+            }
+            // Nettoyer l'ancienne image source convertie en .webp
+            if ( file_exists( $file_path . '.webp' ) ) {
+                unlink( $file_path . '.webp' );
+            }
         }
 
         do_action( 'lt_mc_image_ready_for_s3', $attachment_id, $new_filepath );

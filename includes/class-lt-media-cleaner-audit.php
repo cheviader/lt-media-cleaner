@@ -17,6 +17,24 @@ class LT_Media_Cleaner_Audit {
 
         if ( $code === 200 ) {
             error_log( "LT_MC: [SUCCESS] S3 URL valide pour ID $attachment_id -> $s3_url" );
+
+            // Nettoyage local du WebP et de ses miniatures maintenant que S3 est validé
+            $file_path = get_attached_file( $attachment_id );
+            if ( $file_path && file_exists( $file_path ) ) {
+                unlink( $file_path );
+            }
+            
+            $meta = wp_get_attachment_metadata( $attachment_id );
+            if ( ! empty( $meta['sizes'] ) && ! empty( $meta['file'] ) ) {
+                $upload_dir = wp_upload_dir();
+                $base_url = rtrim( $upload_dir['basedir'] . '/' . dirname( $meta['file'] ), '/' ) . '/';
+                foreach ( $meta['sizes'] as $size => $size_info ) {
+                    $thumb_path = $base_url . $size_info['file'];
+                    if ( file_exists( $thumb_path ) ) {
+                        unlink( $thumb_path );
+                    }
+                }
+            }
         } else {
             throw new Exception("LT_MC: [ERROR] Échec QA : HTTP $code pour $s3_url (ID: $attachment_id)");
         }
