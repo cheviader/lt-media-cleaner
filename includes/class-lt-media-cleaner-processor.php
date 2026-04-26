@@ -64,15 +64,13 @@ class LT_Media_Cleaner_Processor {
         $old_attached_file = get_post_meta( $attachment_id, '_wp_attached_file', true );
         $new_attached_file = preg_replace('/\.[^.]+$/', '.webp', $old_attached_file);
 
-        $new_meta = [
-            'width'  => $saved['width'],
-            'height' => $saved['height'],
-            'file'   => $new_attached_file,
-            'sizes'  => []
-        ];
-        
-        update_post_meta( $attachment_id, '_wp_attachment_metadata', $new_meta );
-        update_attached_file( $attachment_id, $new_filepath );
+        update_post_meta( $attachment_id, '_wp_attached_file', $new_attached_file );
+
+        if ( ! function_exists( 'wp_generate_attachment_metadata' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+        }
+        $metadata = wp_generate_attachment_metadata( $attachment_id, $new_filepath );
+        wp_update_attachment_metadata( $attachment_id, $metadata );
 
         if ( $file_path !== $new_filepath && file_exists( $file_path ) ) {
             unlink( $file_path );

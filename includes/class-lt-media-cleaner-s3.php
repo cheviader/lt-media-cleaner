@@ -7,45 +7,89 @@ class LT_Media_Cleaner_S3 {
     }
 
     public static function offload_image( $attachment_id, $new_filepath ) {
+        $s3_ok = false;
+
         // 1. Déclencher l'offload via Advanced Media Offloader
-        // Si Advanced Media Offloader ne le fait pas automatiquement via wp_update_attachment_metadata ou update_attached_file
-        // Nous l'appellerons ici lors du test sur Staging si nécessaire.
-        
+        if ( function_exists( 'advmo' ) ) {
+            $advmo = advmo();
+            $cloud_provider = $advmo->container->get('cloud_provider');
+            if ( $cloud_provider ) {
+                $uploader = new \Advanced_Media_Offloader\Services\CloudAttachmentUploader( $cloud_provider );
+                add_filter( 'advmo_local_deletion_rule', '__return_zero' );
+                $uploader->uploadAttachment( $attachment_id );
+                $s3_ok = true;
+            } else {
+                throw new Exception( "LT_MC: Cloud provider ADVMO non trouvé." );
+            }
+        } else {
+            throw new Exception( "LT_MC: Plugin Advanced Media Offloader inactif." );
+        }
+
         // 2. Remplacer physiquement les URLs dans les contenus
         global $wpdb;
         $upload_dir = wp_upload_dir();
         $s3_url = wp_get_attachment_url( $attachment_id );
-        
-        // Sécurité : ne remplacer que si on a bien une URL différente (S3) et non l'URL locale classique
-        if ( strpos( $s3_url, $upload_dir['baseurl'] ) === false ) {
-            
+
+        // On s'assure que l'URL retournée par WP n'est plus locale
+        if ( $s3_ok && strpos( $s3_url, $upload_dir['baseurl'] ) === false ) {
             $path_info = pathinfo( $new_filepath );
             $base_name = $path_info['filename'];
-            $attached_file = get_post_meta( $attachment_id, '_wp_attached_file', true );
             
-            // Reconstruire l'URL locale de base
-            $local_url_base = $upload_dir['baseurl'] . '/' . dirname( $attached_file ) . '/' . $base_name;
-            $local_url_base = str_replace('/./', '/', $local_url_base); // Au cas où dirname est '.'
-            
-            // On remplace les vieilles URLs JPG et PNG dans post_content
-            $wpdb->query( $wpdb->prepare( 
-                "UPDATE $wpdb->posts SET post_content = REPLACE(post_content, %s, %s)",
-                $local_url_base . '.jpg', $s3_url
-            ) );
-            
-            $wpdb->query( $wpdb->prepare( 
-                "UPDATE $wpdb->posts SET post_content = REPLACE(post_content, %s, %s)",
-                $local_url_base . '.png', $s3_url
-            ) );
-            
-            // Et potentiellement WebP (si on l'a déjà convertie mais qu'elle était locale avant l'offload)
-            $wpdb->query( $wpdb->prepare( 
-                "UPDATE $wpdb->posts SET post_content = REPLACE(post_content, %s, %s)",
-                $local_url_base . '.webp', $s3_url
-            ) );
+            self::replace_content_urls( $attachment_id, $base_name, $s3_url );
         }
 
         // 3. Planifier l'audit pour cette image précise
         as_enqueue_async_action('lt_mc_verify_s3_url', [ 'attachment_id' => $attachment_id, 's3_url' => $s3_url ], 'lt_media_cleaner_images');
+    }
+
+    private static function replace_content_urls( $id, $filename_no_ext, $new_url ) {
+        global $wpdb;
+        
+        $posts = $wpdb->get_results( $wpdb->prepare(
+            "SELECT ID, post_content FROM {$wpdb->posts} 
+             WHERE post_content LIKE %s OR post_content LIKE %s",
+            '%wp-image-' . $id . '%',
+            '%' . $wpdb->esc_like( basename( $filename_no_ext ) ) . '%'
+        ) );
+        
+        $filename_quoted = preg_quote( basename( $filename_no_ext ), '~' );
+        
+        foreach ( $posts as $p ) {
+            $content = $p->post_content;
+            
+            // 1. Pattern : toute URL HTTP/HTTPS se terminant par le nom du fichier + taille optionnelle + extension
+            $pattern_url = '~https?://[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)~i';
+            $content = preg_replace( $pattern_url, $new_url, $content );
+            
+            // 2. Pattern : URLs échappées en JSON (Gutenberg)
+            $new_url_esc = str_replace( '/', '\/', $new_url );
+            $pattern_esc = '~https?:\\\\/\\\\/[^\s"\'<>\\\\]+\\\/' . $filename_quoted . '(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)~i';
+            $content = preg_replace( $pattern_esc, $new_url_esc, $content );
+
+            // 3. Correction des chemins relatifs stricts (commençant par /wp-content/)
+            $pattern_rel = '~/wp-content/[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)~i';
+            $content = preg_replace( $pattern_rel, $new_url, $content );
+            
+            // 4. Correction Gutenberg wp:image (JSON "url")
+            $content = preg_replace(
+                '/(<!\-\-\s*wp:image\s*.*?)"url"\s*:\s*"[^"]+".*?(-->)/ism',
+                '$1"url":"' . $new_url . '"$2',
+                $content
+            );
+            
+            // 5. Suppression de l'attribut srcset (devenu invalide)
+            $content = preg_replace(
+                '/(<img[^>]+wp-image-' . $id . '[^>]+)srcset="[^"]*"/i',
+                '$1',
+                $content
+            );
+            
+            if ( $content !== $p->post_content ) {
+                $wpdb->update( $wpdb->posts, 
+                    [ 'post_content' => $content ], 
+                    [ 'ID' => $p->ID ]
+                );
+            }
+        }
     }
 }
