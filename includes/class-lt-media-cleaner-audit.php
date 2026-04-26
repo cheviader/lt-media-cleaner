@@ -19,19 +19,26 @@ class LT_Media_Cleaner_Audit {
             error_log( "LT_MC: [SUCCESS] S3 URL valide pour ID $attachment_id -> $s3_url" );
 
             // Nettoyage local du WebP et de ses miniatures maintenant que S3 est validé
-            $file_path = get_attached_file( $attachment_id );
-            if ( $file_path && file_exists( $file_path ) ) {
-                unlink( $file_path );
-            }
+            // Contournement des filtres du plugin S3 en récupérant le chemin brut
+            $relative_path = get_post_meta( $attachment_id, '_wp_attached_file', true );
             
-            $meta = wp_get_attachment_metadata( $attachment_id );
-            if ( ! empty( $meta['sizes'] ) && ! empty( $meta['file'] ) ) {
-                $upload_dir = wp_upload_dir();
-                $base_url = rtrim( $upload_dir['basedir'] . '/' . dirname( $meta['file'] ), '/' ) . '/';
-                foreach ( $meta['sizes'] as $size => $size_info ) {
-                    $thumb_path = $base_url . $size_info['file'];
-                    if ( file_exists( $thumb_path ) ) {
-                        unlink( $thumb_path );
+            if ( $relative_path ) {
+                $local_base_dir = WP_CONTENT_DIR . '/uploads/';
+                $local_file_path = $local_base_dir . $relative_path;
+
+                if ( file_exists( $local_file_path ) ) {
+                    unlink( $local_file_path );
+                }
+                
+                // Contournement des filtres pour les métadonnées
+                $meta = get_post_meta( $attachment_id, '_wp_attachment_metadata', true );
+                if ( ! empty( $meta['sizes'] ) && ! empty( $meta['file'] ) ) {
+                    $local_folder = $local_base_dir . rtrim( dirname( $meta['file'] ), '/' ) . '/';
+                    foreach ( $meta['sizes'] as $size => $size_info ) {
+                        $thumb_path = $local_folder . $size_info['file'];
+                        if ( file_exists( $thumb_path ) ) {
+                            unlink( $thumb_path );
+                        }
                     }
                 }
             }
