@@ -51,17 +51,47 @@ class LT_Media_Cleaner_Audit {
         global $wpdb;
         $upload_dir = wp_upload_dir();
         $base_url = $upload_dir['baseurl'] . '/' . $year . '/' . $month;
+        $like_pattern = '%' . $wpdb->esc_like( $base_url ) . '%';
 
+        $errors = [];
+
+        // 1. Audit wp_posts
         $posts = $wpdb->get_results( $wpdb->prepare(
-            "SELECT ID, post_title, post_content FROM $wpdb->posts WHERE post_status = 'publish' AND post_content LIKE %s",
-            '%' . $wpdb->esc_like( $base_url ) . '%'
+            "SELECT ID FROM $wpdb->posts WHERE post_status = 'publish' AND post_content LIKE %s",
+            $like_pattern
         ) );
-
         if ( ! empty( $posts ) ) {
             $orphan_ids = implode(', ', array_map(function($p) { return $p->ID; }, $posts));
-            throw new Exception("LT_MC: [ERROR] URLs locales orphelines détectées dans les posts ID: $orphan_ids");
+            $errors[] = "posts (IDs: $orphan_ids)";
+        }
+
+        // 2. Audit wp_postmeta
+        $postmetas = $wpdb->get_results( $wpdb->prepare(
+            "SELECT post_id, meta_key FROM $wpdb->postmeta WHERE meta_value LIKE %s",
+            $like_pattern
+        ) );
+        if ( ! empty( $postmetas ) ) {
+            $meta_details = array_map(function($m) { return $m->post_id . ':' . $m->meta_key; }, $postmetas);
+            $meta_str = implode(', ', array_unique($meta_details));
+            $errors[] = "postmeta (Post:Key -> $meta_str)";
+        }
+
+        // 3. Audit wp_options
+        $options = $wpdb->get_results( $wpdb->prepare(
+            "SELECT option_name FROM $wpdb->options WHERE option_value LIKE %s AND option_name NOT LIKE %s",
+            $like_pattern,
+            '%_transient_%'
+        ) );
+        if ( ! empty( $options ) ) {
+            $option_names = implode(', ', array_map(function($o) { return $o->option_name; }, $options));
+            $errors[] = "options ($option_names)";
+        }
+
+        if ( ! empty( $errors ) ) {
+            $error_message = "LT_MC: [ERROR] URLs locales orphelines détectées dans : " . implode( " | ", $errors );
+            throw new Exception( $error_message );
         } else {
-            error_log( "LT_MC: [SUCCESS] Audit terminé pour $year-$month : Aucune URL locale résiduelle trouvée dans les posts publiés." );
+            error_log( "LT_MC: [SUCCESS] Audit exhaustif terminé pour $year-$month : Aucune URL locale résiduelle trouvée." );
         }
     }
 }
