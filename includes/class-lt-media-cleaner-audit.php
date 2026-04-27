@@ -5,6 +5,13 @@ class LT_Media_Cleaner_Audit {
     public static function init() {
         add_action( 'lt_mc_verify_s3_url', [ __CLASS__, 'verify_s3_url' ], 10, 2 );
         add_action( 'lt_mc_audit_month_posts', [ __CLASS__, 'audit_month_posts' ], 10, 2 );
+        add_action( 'admin_notices', [ __CLASS__, 'display_front_end_errors' ] );
+    }
+
+    public static function display_front_end_errors() {
+        if ( get_option( 'lt_mc_front_end_errors' ) ) {
+            echo '<div class="notice notice-error is-dismissible"><p><strong>LT Media Cleaner :</strong> Des images locales/cassées ont été détectées sur le front-end lors du dernier audit. <a href="'. esc_url( content_url( 'uploads/lt-media-cleaner-audit.log' ) ) .'" target="_blank">Consultez les logs</a>.</p></div>';
+        }
     }
 
     public static function verify_s3_url( $attachment_id, $s3_url ) {
@@ -24,20 +31,18 @@ class LT_Media_Cleaner_Audit {
             
             if ( $relative_path ) {
                 $local_base_dir = WP_CONTENT_DIR . '/uploads/';
-                $local_file_path = $local_base_dir . $relative_path;
-
-                if ( file_exists( $local_file_path ) ) {
-                    unlink( $local_file_path );
-                }
+                $file_info = pathinfo( $local_base_dir . $relative_path );
+                $dir = $file_info['dirname'];
+                $filename_no_ext = $file_info['filename'];
                 
-                // Contournement des filtres pour les métadonnées
-                $meta = get_post_meta( $attachment_id, '_wp_attachment_metadata', true );
-                if ( ! empty( $meta['sizes'] ) && ! empty( $meta['file'] ) ) {
-                    $local_folder = $local_base_dir . rtrim( dirname( $meta['file'] ), '/' ) . '/';
-                    foreach ( $meta['sizes'] as $size => $size_info ) {
-                        $thumb_path = $local_folder . $size_info['file'];
-                        if ( file_exists( $thumb_path ) ) {
-                            unlink( $thumb_path );
+                // Nettoyage agressif : Recherche de tous les fichiers (originaux, webp, miniatures exotiques)
+                $pattern = $dir . '/' . $filename_no_ext . '*.*';
+                $files_to_delete = glob( $pattern );
+                
+                if ( $files_to_delete ) {
+                    foreach ( $files_to_delete as $file ) {
+                        if ( is_file( $file ) ) {
+                            unlink( $file );
                         }
                     }
                 }
@@ -92,6 +97,30 @@ class LT_Media_Cleaner_Audit {
             throw new Exception( $error_message );
         } else {
             error_log( "LT_MC: [SUCCESS] Audit exhaustif terminé pour $year-$month : Aucune URL locale résiduelle trouvée." );
+
+            // 4. Audit Front-End (HTML)
+            $front_posts = $wpdb->get_results( $wpdb->prepare(
+                "SELECT ID FROM $wpdb->posts WHERE post_status = 'publish' AND post_content LIKE %s LIMIT 100",
+                '%' . $wpdb->esc_like( $year . '/' . $month ) . '%'
+            ) );
+            
+            if ( ! empty( $front_posts ) ) {
+                $log_file = WP_CONTENT_DIR . '/uploads/lt-media-cleaner-audit.log';
+                foreach ( $front_posts as $p ) {
+                    $permalink = get_permalink( $p->ID );
+                    $response = wp_remote_get( $permalink );
+                    
+                    if ( ! is_wp_error( $response ) && wp_remote_retrieve_response_code( $response ) === 200 ) {
+                        $html = wp_remote_retrieve_body( $response );
+                        // Recherche des attributs src pointant vers le dossier local
+                        if ( preg_match( '/<img[^>]+src=["\']([^"\']*wp-content\/uploads\/[^"\']+)["\']/i', $html, $matches ) ) {
+                            $log_message = sprintf( "[%s] ALERTE FRONT-END : Image locale (%s) trouvée sur %s\n", date('Y-m-d H:i:s'), $matches[1], $permalink );
+                            error_log( $log_message, 3, $log_file );
+                            update_option( 'lt_mc_front_end_errors', true );
+                        }
+                    }
+                }
+            }
         }
     }
 }
