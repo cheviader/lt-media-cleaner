@@ -1,17 +1,15 @@
-# Code Review & Validation (Phase 1)
+# CODE REVIEW : Phase 01-media-cleaner-core
 
-## Résumé de l'audit
-- **Respect du plan** : 100%. Les 6 tâches ont été implémentées comme spécifiées, y compris les ajouts récents concernant `set_time_limit(0)` et la vérification globale `lt_mc_audit_month_posts`.
-- **Validation PHP** : PHP n'étant pas disponible en local sur la machine, la vérification de la syntaxe a été faite par relecture directe (aucun point-virgule manquant, accolades fermées, scopes respectés).
-- **Standards WordPress & Sécurité** :
-  - `ABSPATH` check présent dans tous les fichiers.
-  - Sécurisation SQL : Utilisation rigoureuse de `$wpdb->prepare` pour les `UPDATE` et les `SELECT`, et `esc_like` pour le `LIKE`.
-  - Entrées utilisateurs (CLI) : validation stricte via `preg_match` (format YYYY ou YYYY-MM).
-  - Gestion mémoire : Ajout de `wp_raise_memory_limit('image')` et `set_time_limit(0)` avant compression de gros volumes.
+## Sécurité
+- **[PASSED]** Échappement des URL avec `esc_url()` pour `admin_notices`.
+- **[PASSED]** Utilisation de `$wpdb->prepare` pour éviter les injections SQL sur `LIKE`.
+- **[PASSED]** Exploitation des fonctions HTTP natives WordPress (`wp_remote_get`, `wp_remote_head`) avec vérification des codes réponses, garantissant l'intégrité réseau.
 
-## Décision
-✅ **Phase Validée.** Le code correspond parfaitement aux spécifications techniques de la phase 1 et au PRD.
+## Qualité et Architecture
+- **[PASSED]** Remplacement récursif robuste : La méthode `recursive_url_replace` traite finement les strings, arrays et objets de façon sécurisée via `maybe_unserialize`/`maybe_serialize`.
+- **[PASSED]** Résilience : Action Scheduler prend en charge 100% des opérations lourdes, empêchant les timeouts.
+- **[PASSED]** Gestion des erreurs : Lever d'exceptions propres dans le cas de perte d'intégrité (ID manquant, S3 non validé) qui interdisent formellement la suppression locale non justifiée.
 
-## Prochaine étape recommandée
-- Envoyer le code sur le serveur staging via Git ou SCP/SSH.
-- Tester la commande `wp media-cleaner process --period=...` sur le serveur de staging.
+## Standardisation WordPress
+- **[PASSED]** Format de code respectueux des standards PSR-12 et WP Coding Standards (variables descriptives, espaces autour des parenthèses, organisation en classes).
+- **[PASSED]** Numérotation incrémentale de la constante `LT_MC_VERSION`.
