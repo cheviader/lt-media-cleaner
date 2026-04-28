@@ -1,14 +1,14 @@
 <?php
 /**
  * Plugin Name: LT Media Cleaner
- * Version: 1.0.0
+ * Version: 1.0.6
  * Description: Clean, optimize, WebP encode and offload 13 years of media history.
  * Author: Lalutotale
  */
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'LT_MC_VERSION', '1.0.0' );
+define( 'LT_MC_VERSION', '1.0.6' );
 define( 'LT_MC_DIR_PATH', plugin_dir_path( __FILE__ ) );
 
 function lt_mc_check_dependencies() {
@@ -28,6 +28,7 @@ add_action( 'plugins_loaded', function() {
 
     require_once LT_MC_DIR_PATH . 'includes/class-lt-media-cleaner-cli.php';
     require_once LT_MC_DIR_PATH . 'includes/class-lt-media-cleaner-backup.php';
+    require_once LT_MC_DIR_PATH . 'includes/class-lt-media-cleaner-importer.php';
     require_once LT_MC_DIR_PATH . 'includes/class-lt-media-cleaner-processor.php';
     require_once LT_MC_DIR_PATH . 'includes/class-lt-media-cleaner-s3.php';
     require_once LT_MC_DIR_PATH . 'includes/class-lt-media-cleaner-audit.php';
@@ -36,6 +37,7 @@ add_action( 'plugins_loaded', function() {
         LT_Media_Cleaner_CLI::init();
     }
     LT_Media_Cleaner_Backup::init();
+    LT_Media_Cleaner_Importer::init();
     LT_Media_Cleaner_Processor::init();
     LT_Media_Cleaner_S3::init();
     LT_Media_Cleaner_Audit::init();

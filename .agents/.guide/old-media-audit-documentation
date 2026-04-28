@@ -1,0 +1,430 @@
+# Media Audit - Lalutotale Edition : Documentation Technique
+
+> **Version documentée** : 1.6  
+> **Source** : [media-audit-lalutotale-edition](file:///c:/Stockage/Dev/LalutotaleScripts/media-audit-lalutotale-edition)  
+> **Date** : 26 avril 2026
+
+---
+
+## Table des matières
+
+1. [Architecture générale](#1-architecture-générale)
+2. [Le pipeline en 5 étapes](#2-le-pipeline-en-5-étapes)
+3. [Étape 1 — Redimensionnement (Resize)](#3-étape-1--redimensionnement)
+4. [Étape 2 — Conversion WebP](#4-étape-2--conversion-webp)
+5. [Étape 3 — Régénération des métadonnées](#5-étape-3--régénération-des-métadonnées)
+6. [Étape 4 — Offload S3 via Advanced Media Offloader](#6-étape-4--offload-s3)
+7. [Étape 5 — Nettoyage local et mise à jour des URLs](#7-étape-5--nettoyage-et-urls)
+8. [Remplacement des URLs dans le contenu](#8-remplacement-des-urls-dans-le-contenu)
+9. [Les 3 modes d'exécution](#9-les-3-modes-dexécution)
+10. [Sécurité : Backup ZIP préventif](#10-sécurité--backup-zip)
+11. [Schéma récapitulatif du flux](#11-schéma-récapitulatif)
+
+---
+
+## 1. Architecture générale
+
+Le plugin est structuré en 4 classes PHP :
+
+| Classe | Fichier | Rôle |
+|---|---|---|
+| `Media_Audit_Core` | [class-media-audit-core.php](file:///c:/Stockage/Dev/LalutotaleScripts/media-audit-lalutotale-edition/includes/class-media-audit-core.php) | Logique métier : pipeline AJAX (5 étapes), API REST (n8n), audit, backup ZIP |
+| `Media_Audit_Worker` | [class-media-audit-worker.php](file:///c:/Stockage/Dev/LalutotaleScripts/media-audit-lalutotale-edition/includes/class-media-audit-worker.php) | Traitement asynchrone unitaire via **Action Scheduler** |
+| `Media_Audit_CLI` | [class-media-audit-cli.php](file:///c:/Stockage/Dev/LalutotaleScripts/media-audit-lalutotale-edition/includes/class-media-audit-cli.php) | Commandes WP-CLI (`wp lutotale-migrate`, `wp lutotale-fix-urls`) |
+| `Media_Audit_Admin` | [class-media-audit-admin.php](file:///c:/Stockage/Dev/LalutotaleScripts/media-audit-lalutotale-edition/admin/class-media-audit-admin.php) | Interface d'administration WordPress |
+
+---
+
+## 2. Le pipeline en 5 étapes
+
+Chaque image (attachment WordPress) passe par un pipeline séquentiel identique, quel que soit le mode d'exécution :
+
+```
+┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+│ 1.RESIZE │───▶│ 2.WEBP   │───▶│ 3.REGEN  │───▶│ 4.S3     │───▶│ 5.CLEAN  │
+│ (800px)  │    │ (Q:80)   │    │ (meta)   │    │ (advmo)  │    │ (URLs)   │
+└──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
+```
+
+---
+
+## 3. Étape 1 — Redimensionnement
+
+**But** : Réduire la largeur maximale à 800px pour alléger les fichiers avant conversion.
+
+**Fonctions WordPress utilisées** :
+
+```php
+$file_path = get_attached_file($id);            // Chemin absolu du fichier
+$editor    = wp_get_image_editor($file_path);    // Instance WP_Image_Editor (GD ou Imagick)
+
+if (!is_wp_error($editor) && $editor->get_size()['width'] > 800) {
+    $editor->resize(800, null, false);  // Largeur max 800, hauteur proportionnelle, pas de crop
+    $editor->save($file_path);          // Écrasement du fichier original
+}
+```
+
+**Points clés** :
+- Le redimensionnement est **in-place** (écrasement du fichier source)
+- Le ratio d'aspect est conservé (`false` = pas de crop)
+- Le filtre `big_image_size_threshold` est désactivé via `add_filter('big_image_size_threshold', '__return_false')` pour empêcher WordPress de créer ses propres fichiers `-scaled`
+
+---
+
+## 4. Étape 2 — Conversion WebP
+
+**But** : Remplacer le fichier original (JPG/PNG/GIF) par un fichier WebP.
+
+**Fonctions WordPress utilisées** :
+
+```php
+$file_path = get_attached_file($id);
+$path_info = pathinfo($file_path);
+
+// Ne convertir que si ce n'est pas déjà du WebP
+if (strtolower($path_info['extension']) !== 'webp') {
+    $editor = wp_get_image_editor($file_path);
+    
+    if (!is_wp_error($editor)) {
+        // Nouveau chemin : même nom, extension .webp
+        $new_path = $path_info['dirname'] . '/' . $path_info['filename'] . '.webp';
+        
+        $editor->set_quality(80);                          // Qualité WebP à 80%
+        $editor->save($new_path, 'image/webp');            // Sauvegarde en WebP
+        
+        @unlink($file_path);                               // Suppression de l'ancien fichier (jpg/png)
+        
+        // Mise à jour de la BDD WordPress
+        update_attached_file($id, $new_path);              // Met à jour le chemin absolu
+        update_post_meta($id, '_wp_attached_file',         // Met à jour le chemin relatif
+            _wp_relative_upload_path($new_path));
+    }
+}
+```
+
+**Mécanisme détaillé** :
+
+1. `wp_get_image_editor()` crée une instance GD ou Imagick selon la config serveur
+2. `save($new_path, 'image/webp')` force le MIME type WebP quel que soit l'extension d'origine
+3. L'ancien fichier (ex: `photo.jpg`) est supprimé via `@unlink()`
+4. **Deux meta WP sont mises à jour** pour que WordPress « connaisse » le nouveau fichier :
+   - `update_attached_file()` → modifie le chemin absolu retourné par `get_attached_file()`
+   - `_wp_attached_file` → chemin relatif (ex: `2024/01/photo.webp`) utilisé par `wp_get_attachment_url()`
+
+> [!IMPORTANT]
+> Après cette étape, le fichier physique est `photo.webp` mais les URLs dans les articles pointent encore vers `photo.jpg`. La correction des URLs intervient à l'étape 5.
+
+---
+
+## 5. Étape 3 — Régénération des métadonnées
+
+**But** : Recréer les miniatures WordPress à partir du nouveau fichier WebP.
+
+```php
+// 1. Nettoyage préalable : supprimer les anciennes variantes physiques
+$this->delete_variants($id);
+
+// 2. Régénération complète
+if (!function_exists('wp_generate_attachment_metadata')) {
+    require_once(ABSPATH . 'wp-admin/includes/image.php');
+}
+$file_path = get_attached_file($id);
+$metadata  = wp_generate_attachment_metadata($id, $file_path);
+wp_update_attachment_metadata($id, $metadata);
+```
+
+**La méthode `delete_variants()`** :
+
+```php
+private function delete_variants($id) {
+    $metadata = wp_get_attachment_metadata($id);
+    if ($metadata && isset($metadata['sizes'])) {
+        $dir = dirname(get_attached_file($id));
+        foreach ($metadata['sizes'] as $size => $info) {
+            @unlink($dir . '/' . $info['file']);   // Supprime chaque miniature
+        }
+        $metadata['sizes'] = array();
+        update_post_meta($id, '_wp_attachment_metadata', $metadata);
+    }
+}
+```
+
+**Pourquoi cette étape est nécessaire** :
+- Les anciennes variantes (`photo-150x150.jpg`, `photo-300x200.jpg`) n'existent plus en WebP
+- `wp_generate_attachment_metadata()` recrée toutes les tailles enregistrées dans WordPress (thumbnail, medium, large, + tailles custom du thème) à partir du nouveau `.webp`
+- Les nouvelles variantes seront elles aussi en WebP
+
+---
+
+## 6. Étape 4 — Offload S3 via Advanced Media Offloader
+
+**But** : Uploader le fichier WebP + toutes ses variantes sur Amazon S3.
+
+### Code d'intégration
+
+```php
+$s3_ok = false;
+
+if (function_exists('advmo')) {
+    // 1. Récupérer l'instance singleton du plugin
+    $advmo = advmo();
+    
+    // 2. Extraire le cloud provider du container DI
+    $cloud_provider = $advmo->container->get('cloud_provider');
+    
+    if ($cloud_provider) {
+        // 3. Instancier le service d'upload
+        $uploader = new \Advanced_Media_Offloader\Services\CloudAttachmentUploader($cloud_provider);
+        
+        // 4. Forcer la conservation locale (on gère nous-mêmes la suppression)
+        add_filter('advmo_local_deletion_rule', '__return_zero');
+        
+        // 5. Lancer l'upload
+        $uploader->uploadAttachment($id);
+        $s3_ok = true;
+    }
+}
+```
+
+### Détail de chaque appel
+
+#### `advmo()` — Fonction globale du plugin
+- **Rôle** : Retourne l'instance singleton du plugin Advanced Media Offloader
+- **Retour** : Objet principal contenant un `container` (injection de dépendances)
+
+#### `$advmo->container->get('cloud_provider')` — Provider S3
+- **Rôle** : Récupère le service cloud configuré dans les réglages d'ADVMO
+- **Retour** : Instance implémentant l'interface cloud (S3, DigitalOcean Spaces, etc.)
+- Ce provider contient les credentials AWS (clé, secret, bucket, région)
+
+#### `CloudAttachmentUploader` — Service d'upload
+- **Namespace** : `\Advanced_Media_Offloader\Services\CloudAttachmentUploader`
+- **Constructeur** : Reçoit le `$cloud_provider` configuré
+- **Méthode `uploadAttachment($id)`** :
+  - Lit le fichier principal + toutes les variantes depuis `_wp_attachment_metadata`
+  - Upload chaque fichier sur S3 dans le même chemin relatif (`2024/01/photo.webp`)
+  - Met à jour les meta WordPress pour qu'`wp_get_attachment_url()` retourne l'URL S3
+
+#### `advmo_local_deletion_rule` — Filtre de rétention locale
+- **Valeur par défaut ADVMO** : Variable selon la config (peut conserver les fichiers locaux)
+- **Notre override** : `__return_zero` (retourne `0`) → empêche ADVMO de supprimer les fichiers locaux lui-même
+- **Raison** : Le plugin gère sa propre logique de nettoyage à l'étape 5
+
+### Vérification post-upload (Worker uniquement)
+
+Dans `Media_Audit_Worker`, une étape QA vérifie que l'image est accessible sur S3 :
+
+```php
+$s3_url  = wp_get_attachment_url($id);                     // URL S3 post-offload
+$response = wp_remote_head($s3_url, ['timeout' => 10]);    // HEAD request
+$status   = wp_remote_retrieve_response_code($response);   // Doit être 200
+
+if ($status !== 200) {
+    throw new Exception("Échec QA : HTTP $status pour $s3_url");
+}
+```
+
+---
+
+## 7. Étape 5 — Nettoyage local et mise à jour des URLs
+
+### Nettoyage des fichiers locaux
+
+```php
+// Fichier principal
+$file = get_attached_file($id);
+if (file_exists($file)) @unlink($file);
+
+// Image originale WordPress (cas des images "big" avec -scaled)
+$original_source = get_post_meta($id, '_wp_original_image', true);
+if ($original_source) {
+    $original_full_path = dirname($file) . '/' . $original_source;
+    if (file_exists($original_full_path)) @unlink($original_full_path);
+    delete_post_meta($id, '_wp_original_image');
+}
+
+// Toutes les variantes (miniatures)
+$meta = wp_get_attachment_metadata($id);
+if (isset($meta['sizes'])) {
+    $dir = dirname($file);
+    foreach ($meta['sizes'] as $s) {
+        @unlink($dir . '/' . $s['file']);
+    }
+}
+```
+
+**Fichiers supprimés** :
+1. Le fichier principal WebP (ex: `photo.webp`)
+2. L'éventuel fichier `-scaled` original (meta `_wp_original_image`)
+3. L'ancien fichier source (ex: `photo.jpg`) s'il subsistait
+4. Toutes les variantes/miniatures
+
+---
+
+## 8. Remplacement des URLs dans le contenu
+
+C'est le mécanisme clé qui assure que les articles, pages et produits WooCommerce affichent les nouvelles images WebP/S3 au lieu des anciennes JPG/PNG locales.
+
+### Méthode `update_post_content_urls()` (Core — mode AJAX)
+
+```php
+private function update_post_content_urls($id, $old_url, $new_url) {
+    global $wpdb;
+    
+    // 1. Trouver les posts contenant l'image (par class CSS ou URL)
+    $posts = $wpdb->get_results($wpdb->prepare(
+        "SELECT ID, post_content FROM {$wpdb->posts} 
+         WHERE post_content LIKE %s OR post_content LIKE %s",
+        '%wp-image-' . $id . '%',               // Classe CSS Gutenberg
+        '%' . $wpdb->esc_like($old_url) . '%'    // URL directe
+    ));
+    
+    foreach ($posts as $p) {
+        $content = $p->post_content;
+        
+        // 2. Remplacement direct URL complète
+        $content = str_replace($old_url, $new_url, $content);
+        
+        // 3. Remplacement du chemin relatif (path sans domaine)
+        $old_path = parse_url($old_url, PHP_URL_PATH);
+        if ($old_path) {
+            $content = str_replace($old_path, $new_url, $content);
+        }
+        
+        // 4. Remplacement des URLs escaped (JSON dans les blocs Gutenberg)
+        $old_esc = str_replace('/', '\/', $old_url);
+        $new_esc = str_replace('/', '\/', $new_url);
+        $content = str_replace($old_esc, $new_esc, $content);
+        
+        // 5. Correction des commentaires Gutenberg wp:image (JSON "url")
+        $content = preg_replace(
+            '/(<!\-\-\s*wp:image\s*.*?)"url"\s*:\s*"[^"]+".*?(-->)/ism',
+            '$1"url":"' . $new_url . '"$2',
+            $content
+        );
+        
+        // 6. Suppression de l'attribut srcset (devenu invalide)
+        $content = preg_replace(
+            '/(<img[^>]+wp-image-' . $id . '[^>]+)srcset="[^"]*"/i',
+            '$1',
+            $content
+        );
+        
+        // 7. Écriture directe en BDD si modifié
+        if ($content !== $p->post_content) {
+            $wpdb->update($wpdb->posts, 
+                ['post_content' => $content], 
+                ['ID' => $p->ID]
+            );
+        }
+    }
+}
+```
+
+### Les 6 cas de remplacement gérés
+
+| # | Cas | Exemple avant | Exemple après |
+|---|---|---|---|
+| 1 | URL complète | `https://site.com/wp-content/uploads/2024/01/photo.jpg` | `https://bucket.s3.amazonaws.com/2024/01/photo.webp` |
+| 2 | Chemin relatif | `/wp-content/uploads/2024/01/photo.jpg` | URL S3 complète |
+| 3 | URL JSON escaped | `https:\/\/site.com\/...\/photo.jpg` | `https:\/\/bucket.s3...\/photo.webp` |
+| 4 | Bloc Gutenberg `wp:image` | `"url":"https://site.com/.../photo.jpg"` | `"url":"https://bucket.s3.../photo.webp"` |
+| 5 | `srcset` invalide | `srcset="photo-300x200.jpg 300w, ..."` | Attribut **supprimé** |
+| 6 | Classe CSS `wp-image-{ID}` | Utilisée pour la **recherche**, pas le remplacement | — |
+
+### Méthode `replace_urls_in_posts()` (Worker — mode Action Scheduler)
+
+Version similaire utilisée dans le Worker, avec une approche regex :
+
+```php
+// Pattern : toute URL se terminant par le nom du fichier + taille optionnelle + extension image
+$pattern = '~https?://[^\s"\'<>]+/' . preg_quote($filename, '~') . '(?:-\d+x\d+)?\.(jpg|jpeg|png|gif)~i';
+$updated = preg_replace($pattern, $new_url, $p->post_content);
+```
+
+Ce pattern matche :
+- `https://site.com/wp-content/uploads/2024/01/photo.jpg` ✅
+- `https://site.com/wp-content/uploads/2024/01/photo-300x200.jpg` ✅ (variante avec taille)
+- `https://site.com/wp-content/uploads/2024/01/photo-150x150.png` ✅
+
+### Commande WP-CLI `wp lutotale-fix-urls`
+
+Commande de réparation rétroactive pour corriger les URLs après une migration :
+
+```bash
+wp lutotale-fix-urls --year=2024 --month=1
+```
+
+Parcourt tous les attachments WebP du mois ciblé et corrige les références dans `post_content` des articles publiés.
+
+---
+
+## 9. Les 3 modes d'exécution
+
+### Mode 1 : Interface Admin (AJAX — 5 appels séquentiels)
+
+L'UI appelle 5 endpoints AJAX distincts, un par étape, pour chaque image sélectionnée :
+
+| Action AJAX | Handler | Étape |
+|---|---|---|
+| `media_audit_lt_step_resize` | `ajax_step_resize()` | Resize 800px |
+| `media_audit_lt_step_webp` | `ajax_step_webp()` | Conversion WebP |
+| `media_audit_lt_step_regenerate` | `ajax_step_regenerate()` | Regen metadata |
+| `media_audit_lt_step_offload` | `ajax_step_offload()` | Upload S3 |
+| `media_audit_lt_step_cleanup` | `ajax_step_cleanup()` | Clean + URLs |
+
+Chaque appel est protégé par `check_ajax_referer('media_audit_lt_nonce', 'nonce')`.
+
+### Mode 2 : API REST (n8n — batch synchrone)
+
+Endpoint : `POST /wp-json/media-audit-lt/v1/automate`
+
+Le handler `rest_automate_batch()` dans `Media_Audit_Core` exécute les 5 étapes **en une seule requête HTTP** pour un lot d'images (`batch_size`, défaut 5). n8n boucle en incrémentant `offset` jusqu'à recevoir `done: true`.
+
+### Mode 3 : WP-CLI + Action Scheduler (asynchrone)
+
+```bash
+wp lutotale-migrate --year=2024 --month=6
+```
+
+1. La CLI planifie une tâche Action Scheduler par image : `as_enqueue_async_action('lalutotale_migrate_image_task', ['id' => $id])`
+2. Le Worker `process_image_task($id)` exécute les 5 étapes + QA
+3. Une tâche de vérification `lalutotale_verify_month_task` vérifie la complétion et crée un fichier marqueur `.lt-migrated`
+
+---
+
+## 10. Sécurité : Backup ZIP
+
+Avant tout traitement destructif, un backup ZIP du dossier uploads du mois est généré :
+
+```php
+// Chemin : wp-content/uploads/media-audit-backups/backup-2024-01-20260426-101500.zip
+$zip_path = $backup_dir . '/' . sprintf('backup-%04d-%02d-%s.zip', $year, $month, date('Ymd-His'));
+```
+
+- **Mode API** : Le backup est obligatoire (`force_backup=true` ou ZIP existant requis)
+- **Mode CLI** : Généré automatiquement via `$core->generate_backup_sync($y, $m)`
+- **Idempotent** : Si un ZIP existe déjà pour le mois, il est réutilisé
+
+---
+
+## 11. Schéma récapitulatif
+
+```mermaid
+flowchart TD
+    A["Image source<br>photo.jpg (2400x1600)"] --> B["1. Resize<br>wp_get_image_editor()<br>→ 800x533"]
+    B --> C["2. WebP<br>editor→save(photo.webp, image/webp)<br>Qualité 80%"]
+    C --> D["Mise à jour BDD<br>update_attached_file()<br>update_post_meta(_wp_attached_file)"]
+    D --> E["3. Regen<br>delete_variants()<br>wp_generate_attachment_metadata()"]
+    E --> F["4. S3 Upload<br>advmo()→container→get(cloud_provider)<br>CloudAttachmentUploader→uploadAttachment()"]
+    F --> G{"Upload OK ?"}
+    G -->|Oui| H["5a. Clean Local<br>unlink(webp + variantes + original)"]
+    G -->|Non| I["⚠️ Conservé en local"]
+    H --> J["5b. Update URLs<br>str_replace dans post_content<br>+ Gutenberg JSON<br>+ suppression srcset"]
+    J --> K["✅ Image sur S3<br>URLs corrigées dans les articles"]
+```
+
+---
+
+> [!TIP]
+> **Résumé en une phrase** : Le plugin lit chaque image WP, la redimensionne à 800px, la convertit en WebP via `WP_Image_Editor`, régénère les miniatures, instancie programmatiquement le `CloudAttachmentUploader` d'Advanced Media Offloader pour l'envoyer sur S3, puis supprime les fichiers locaux et corrige toutes les URLs dans `wp_posts.post_content` via des `str_replace` + regex ciblant les blocs Gutenberg et les attributs `srcset`.
