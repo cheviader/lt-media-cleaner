@@ -226,16 +226,10 @@ class LT_Media_Cleaner_CLI {
         $month = isset( $assoc_args['month'] ) ? sanitize_text_field( $assoc_args['month'] ) : '';
         
         $upload_dir = wp_upload_dir();
-        $source_dir = $upload_dir['basedir'] . '/' . $year;
-        $zip_name = $year;
+        $base_year_dir = $upload_dir['basedir'] . '/' . $year;
         
-        if ( ! empty( $month ) ) {
-            $source_dir .= '/' . $month;
-            $zip_name .= '-' . $month;
-        }
-        
-        if ( ! is_dir( $source_dir ) ) {
-            WP_CLI::error( "Le répertoire $source_dir n'existe pas." );
+        if ( ! is_dir( $base_year_dir ) ) {
+            WP_CLI::error( "Le répertoire de l'année $base_year_dir n'existe pas." );
         }
 
         $backup_dir = WP_CONTENT_DIR . '/lt-media-backups';
@@ -243,21 +237,50 @@ class LT_Media_Cleaner_CLI {
             mkdir( $backup_dir, 0755, true );
         }
 
-        $zip_file = $backup_dir . '/' . $zip_name . '.zip';
-        $zip = new ZipArchive();
-        if ( $zip->open( $zip_file, ZipArchive::CREATE | ZipArchive::OVERWRITE ) === true ) {
-            $files = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $source_dir ), RecursiveIteratorIterator::LEAVES_ONLY );
-            foreach ( $files as $name => $file ) {
-                if ( ! $file->isDir() ) {
-                    $file_path = $file->getRealPath();
-                    $relative_path = substr( $file_path, strlen( $source_dir ) + 1 );
-                    $zip->addFile( $file_path, $relative_path );
-                }
-            }
-            $zip->close();
-            WP_CLI::success( "Backup créé : $zip_file" );
+        $months_to_process = [];
+        if ( ! empty( $month ) ) {
+            $months_to_process[] = $month;
         } else {
-            WP_CLI::error( "Impossible de créer le fichier ZIP." );
+            // Par défaut, on fait les 12 mois
+            for ( $m = 1; $m <= 12; $m++ ) {
+                $months_to_process[] = str_pad( $m, 2, '0', STR_PAD_LEFT );
+            }
+        }
+
+        $success_count = 0;
+
+        foreach ( $months_to_process as $m ) {
+            $source_dir = $base_year_dir . '/' . $m;
+            $zip_name = $year . '-' . $m;
+            
+            if ( ! is_dir( $source_dir ) ) {
+                WP_CLI::log( "Ignoré : Le répertoire $source_dir n'existe pas." );
+                continue;
+            }
+
+            $zip_file = $backup_dir . '/' . $zip_name . '.zip';
+            $zip = new ZipArchive();
+            if ( $zip->open( $zip_file, ZipArchive::CREATE | ZipArchive::OVERWRITE ) === true ) {
+                $files = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $source_dir ), RecursiveIteratorIterator::LEAVES_ONLY );
+                foreach ( $files as $name => $file ) {
+                    if ( ! $file->isDir() ) {
+                        $file_path = $file->getRealPath();
+                        $relative_path = substr( $file_path, strlen( $source_dir ) + 1 );
+                        $zip->addFile( $file_path, $relative_path );
+                    }
+                }
+                $zip->close();
+                WP_CLI::success( "Backup créé : $zip_file" );
+                $success_count++;
+            } else {
+                WP_CLI::warning( "Impossible de créer le fichier ZIP $zip_file." );
+            }
+        }
+
+        if ( $success_count === 0 ) {
+            WP_CLI::error( "Aucun backup n'a pu être généré." );
+        } else {
+            WP_CLI::success( "$success_count backup(s) mensuel(s) généré(s) pour l'année $year." );
         }
     }
 
