@@ -2,48 +2,60 @@
 defined( 'ABSPATH' ) || exit;
 
 class LT_Media_Cleaner_S3 {
-
     public static function init() {
-        // Appelé directement par le Processor — pas de hook
+        add_action( 'lt_mc_image_ready_for_s3', [ __CLASS__, 'offload_image' ], 10, 2 );
     }
 
-    /**
-     * Upload un attachment vers S3 via Advanced Media Offloader.
-     */
-    public static function offload_to_s3( $attachment_id ) {
-        if ( ! function_exists( 'advmo' ) ) {
+    public static function offload_image( $attachment_id, $new_filepath ) {
+        $s3_ok = false;
+
+        // 1. Déclencher l'offload via Advanced Media Offloader
+        if ( function_exists( 'advmo' ) ) {
+            $advmo = advmo();
+            $cloud_provider = $advmo->container->get('cloud_provider');
+            if ( $cloud_provider ) {
+                $uploader = new \Advanced_Media_Offloader\Services\CloudAttachmentUploader( $cloud_provider );
+                add_filter( 'advmo_local_deletion_rule', '__return_zero' );
+                $uploader->uploadAttachment( $attachment_id );
+                $s3_ok = true;
+            } else {
+                throw new Exception( "LT_MC: Cloud provider ADVMO non trouvé." );
+            }
+        } else {
             throw new Exception( "LT_MC: Plugin Advanced Media Offloader inactif." );
         }
 
-        $advmo          = advmo();
-        $cloud_provider = $advmo->container->get( 'cloud_provider' );
+        // 2. Remplacer physiquement les URLs dans les contenus
+        global $wpdb;
+        $upload_dir = wp_upload_dir();
+        $s3_url = wp_get_attachment_url( $attachment_id );
 
-        if ( ! $cloud_provider ) {
-            throw new Exception( "LT_MC: Cloud provider ADVMO non trouvé." );
+        // On s'assure que l'URL retournée par WP n'est plus locale
+        if ( $s3_ok && strpos( $s3_url, $upload_dir['baseurl'] ) === false ) {
+            $path_info = pathinfo( $new_filepath );
+            $base_name = $path_info['filename'];
+            
+            self::replace_content_urls( $attachment_id, $base_name, $s3_url );
         }
 
-        $uploader = new \Advanced_Media_Offloader\Services\CloudAttachmentUploader( $cloud_provider );
-        add_filter( 'advmo_local_deletion_rule', '__return_zero' );
-        $uploader->uploadAttachment( $attachment_id );
+        // 3. Planifier l'audit pour cette image précise
+        as_enqueue_async_action('lt_mc_verify_s3_url', [ 'attachment_id' => $attachment_id, 's3_url' => $s3_url ], 'lt_media_cleaner_images');
     }
 
-    /**
-     * Remplacer toutes les URLs locales d'un attachment dans la BDD.
-     */
-    public static function replace_content_urls( $id, $filename_no_ext, $new_url ) {
+    private static function replace_content_urls( $id, $filename_no_ext, $new_url ) {
         global $wpdb;
-
-        $filename_quoted = preg_quote( $filename_no_ext, '~' );
-        $like_id         = '%wp-image-' . $id . '%';
-        $like_name       = '%' . $wpdb->esc_like( $filename_no_ext ) . '%';
+        
+        $filename_quoted = preg_quote( basename( $filename_no_ext ), '~' );
+        $like_id = '%wp-image-' . $id . '%';
+        $like_name = '%' . $wpdb->esc_like( basename( $filename_no_ext ) ) . '%';
 
         // 1. wp_posts (post_content)
         $posts = $wpdb->get_results( $wpdb->prepare(
-            "SELECT ID, post_content FROM {$wpdb->posts}
+            "SELECT ID, post_content FROM {$wpdb->posts} 
              WHERE post_content LIKE %s OR post_content LIKE %s",
             $like_id, $like_name
         ) );
-
+        
         foreach ( $posts as $p ) {
             $content = self::apply_regex_replacements( $p->post_content, $id, $filename_quoted, $new_url );
             if ( $content !== $p->post_content ) {
@@ -53,11 +65,11 @@ class LT_Media_Cleaner_S3 {
 
         // 2. wp_postmeta (meta_value)
         $metas = $wpdb->get_results( $wpdb->prepare(
-            "SELECT meta_id, meta_value FROM {$wpdb->postmeta}
+            "SELECT meta_id, meta_value FROM {$wpdb->postmeta} 
              WHERE meta_value LIKE %s OR meta_value LIKE %s",
             $like_id, $like_name
         ) );
-
+        
         foreach ( $metas as $m ) {
             $unserialized = maybe_unserialize( $m->meta_value );
             $updated_data = self::recursive_url_replace( $unserialized, $id, $filename_quoted, $new_url );
@@ -69,11 +81,11 @@ class LT_Media_Cleaner_S3 {
 
         // 3. wp_options (option_value)
         $options = $wpdb->get_results( $wpdb->prepare(
-            "SELECT option_id, option_name, option_value FROM {$wpdb->options}
+            "SELECT option_id, option_name, option_value FROM {$wpdb->options} 
              WHERE option_value LIKE %s OR option_value LIKE %s",
             $like_id, $like_name
         ) );
-
+        
         foreach ( $options as $opt ) {
             if ( strpos( $opt->option_name, '_transient_' ) !== false ) {
                 continue;
@@ -87,31 +99,32 @@ class LT_Media_Cleaner_S3 {
         }
     }
 
-    /**
-     * Regex de remplacement d'URLs dans une chaîne.
-     */
     public static function apply_regex_replacements( $string, $id, $filename_quoted, $new_url ) {
         if ( ! is_string( $string ) || empty( $string ) ) {
             return $string;
         }
 
-        // Nettoyage de sécurité : on retire le "-scaled" ou "-rotated" de la base si jamais il était passé en argument
-        $filename_quoted = preg_replace('/(?:-scaled|-rotated)$/i', '', $filename_quoted);
-
-        // 1. URLs HTTP/HTTPS complètes (Autorise les suffixes, dimensions, et "avale" les query strings comme ?w=300)
-        $pattern_url = '~https?://[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
+        // 1. Pattern : toute URL HTTP/HTTPS se terminant par le nom du fichier + taille optionnelle + extension
+        $pattern_url = '~https?://[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)~i';
         $string = preg_replace( $pattern_url, $new_url, $string );
-
-        // 2. URLs échappées JSON (Gutenberg)
+        
+        // 2. Pattern : URLs échappées en JSON (Gutenberg)
         $new_url_esc = str_replace( '/', '\/', $new_url );
-        $pattern_esc = '~https?:\\\\/\\\\/[^\s"\'<>\\\\]+\\\\/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
+        $pattern_esc = '~https?:\\\\/\\\\/[^\s"\'<>\\\\]+\\\/' . $filename_quoted . '(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)~i';
         $string = preg_replace( $pattern_esc, $new_url_esc, $string );
 
-        // 3. Chemins relatifs (/wp-content/)
-        $pattern_rel = '~/wp-content/[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
+        // 3. Correction des chemins relatifs stricts (commençant par /wp-content/)
+        $pattern_rel = '~/wp-content/[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)~i';
         $string = preg_replace( $pattern_rel, $new_url, $string );
-
-        // 4. Suppression srcset (devenu invalide)
+        
+        // 4. Correction Gutenberg wp:image (JSON "url")
+        $string = preg_replace(
+            '/(<!\-\-\s*wp:image\s*.*?)"url"\s*:\s*"[^"]+".*?(-->)/ism',
+            '$1"url":"' . $new_url . '"$2',
+            $string
+        );
+        
+        // 5. Suppression de l'attribut srcset (devenu invalide)
         $string = preg_replace(
             '/(<img[^>]+wp-image-' . $id . '[^>]+)srcset="[^"]*"/i',
             '$1',
@@ -121,9 +134,6 @@ class LT_Media_Cleaner_S3 {
         return $string;
     }
 
-    /**
-     * Remplacement récursif dans les structures sérialisées.
-     */
     public static function recursive_url_replace( $data, $id, $filename_quoted, $new_url ) {
         if ( is_string( $data ) ) {
             return self::apply_regex_replacements( $data, $id, $filename_quoted, $new_url );

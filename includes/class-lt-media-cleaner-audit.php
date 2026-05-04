@@ -8,6 +8,57 @@ class LT_Media_Cleaner_Audit {
     }
 
     /**
+     * Extrait les images d'un contenu HTML en utilisant DOMDocument avec fallback Regex.
+     * 
+     * @param string $html_content
+     * @return array Tableau contenant les URL et balises HTML complètes.
+     */
+    public static function extract_images( $html_content ) {
+        $images = [];
+        if ( empty( trim( $html_content ) ) ) {
+            return $images;
+        }
+
+        libxml_use_internal_errors( true );
+        $dom = new DOMDocument();
+        
+        // Ajout meta charset pour que DOMDocument lise correctement l'UTF-8 sans deprecation (PHP 8.2+)
+        $html_wrapped = '<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head><body>' . $html_content . '</body></html>';
+        
+        // LoadHTML est parfois capricieux sur des fragments.
+        $loaded = @$dom->loadHTML( $html_wrapped, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD );
+        
+        if ( $loaded ) {
+            $img_tags = $dom->getElementsByTagName( 'img' );
+            foreach ( $img_tags as $img ) {
+                $src = $img->getAttribute( 'src' );
+                if ( ! empty( $src ) ) {
+                    // On recrée la balise brute pour info
+                    $html_tag_raw = $dom->saveHTML( $img );
+                    $images[] = [
+                        'url'          => $src,
+                        'html_tag_raw' => $html_tag_raw
+                    ];
+                }
+            }
+        } else {
+            // Fallback Regex
+            if ( preg_match_all( '/<img[^>]+src=[\'"]([^\'"]+)[\'"][^>]*>/i', $html_content, $matches, PREG_SET_ORDER ) ) {
+                foreach ( $matches as $match ) {
+                    $images[] = [
+                        'url'          => $match[1],
+                        'html_tag_raw' => $match[0]
+                    ];
+                }
+            }
+        }
+        
+        libxml_clear_errors();
+        
+        return $images;
+    }
+
+    /**
      * Audit final d'un mois : vérification S3 + scan URLs locales résiduelles.
      */
     public static function audit_month( $year, $month ) {
