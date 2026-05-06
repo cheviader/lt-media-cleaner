@@ -20,7 +20,8 @@ class LT_Media_Cleaner_Processor {
 
         $attachment_id = attachment_url_to_postid( $clean_url );
         if ( ! $attachment_id ) {
-            $attachment_id = $wpdb->get_var( $wpdb->prepare( "SELECT post_id FROM $wpdb->postmeta WHERE meta_key = '_wp_attached_file' AND meta_value LIKE %s", '%' . basename( $clean_url ) ) );
+            $base_filename = preg_replace('/(?:-\d+x\d+)?(?:-scaled)?(?:-rotated)?(\.[^.]+)$/i', '$1', basename( $clean_url ) );
+            $attachment_id = $wpdb->get_var( $wpdb->prepare( "SELECT post_id FROM $wpdb->postmeta WHERE meta_key = '_wp_attached_file' AND meta_value LIKE %s", '%' . $base_filename ) );
         }
 
         if ( ! $attachment_id ) {
@@ -45,6 +46,7 @@ class LT_Media_Cleaner_Processor {
             }
 
             $filename_no_ext = pathinfo( parse_url( $image_url, PHP_URL_PATH ), PATHINFO_FILENAME );
+            $filename_no_ext = preg_replace('/(?:-scaled|-rotated)$/i', '', $filename_no_ext);
             $filename_quoted = preg_quote( $filename_no_ext, '~' );
             
             $post_content = LT_Media_Cleaner_S3::apply_regex_replacements( $post->post_content, $attachment_id, $filename_quoted, $new_url_with_params );

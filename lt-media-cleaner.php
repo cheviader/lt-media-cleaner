@@ -1,14 +1,14 @@
 <?php
 /**
  * Plugin Name: LT Media Cleaner
- * Version: 1.1.0
+ * Version: 1.2.1
  * Description: Clean, optimize, WebP encode and offload 13 years of media history.
  * Author: Lalutotale
  */
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'LT_MC_VERSION', '1.1.0' );
+define( 'LT_MC_VERSION', '1.2.1' );
 define( 'LT_MC_DIR_PATH', plugin_dir_path( __FILE__ ) );
 
 require_once LT_MC_DIR_PATH . 'includes/class-lt-media-cleaner-db.php';

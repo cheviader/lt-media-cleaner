@@ -33,6 +33,7 @@ class LT_Media_Cleaner_S3 {
     public static function replace_content_urls( $id, $filename_no_ext, $new_url ) {
         global $wpdb;
 
+        $filename_no_ext = preg_replace('/(?:-scaled|-rotated)$/i', '', $filename_no_ext);
         $filename_quoted = preg_quote( $filename_no_ext, '~' );
         $like_id         = '%wp-image-' . $id . '%';
         $like_name       = '%' . $wpdb->esc_like( $filename_no_ext ) . '%';
@@ -95,28 +96,29 @@ class LT_Media_Cleaner_S3 {
             return $string;
         }
 
-        // Nettoyage de sécurité : on retire le "-scaled" ou "-rotated" de la base si jamais il était passé en argument
-        $filename_quoted = preg_replace('/(?:-scaled|-rotated)$/i', '', $filename_quoted);
-
         // 1. URLs HTTP/HTTPS complètes (Autorise les suffixes, dimensions, et "avale" les query strings comme ?w=300)
-        $pattern_url = '~https?://[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
-        $string = preg_replace( $pattern_url, $new_url, $string );
+        $pattern_url = '~https?://[^\s"\'<>\\\\]*?/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
+        $new_string = preg_replace( $pattern_url, $new_url, $string );
+        if ( $new_string !== null ) { $string = $new_string; }
 
         // 2. URLs échappées JSON (Gutenberg)
         $new_url_esc = str_replace( '/', '\/', $new_url );
-        $pattern_esc = '~https?:\\\\/\\\\/[^\s"\'<>\\\\]+\\\\/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
-        $string = preg_replace( $pattern_esc, $new_url_esc, $string );
+        $pattern_esc = '~https?:\\\\/\\\\/[^\s"\'<>\\\\]*?\\\\/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
+        $new_string = preg_replace( $pattern_esc, $new_url_esc, $string );
+        if ( $new_string !== null ) { $string = $new_string; }
 
         // 3. Chemins relatifs (/wp-content/)
-        $pattern_rel = '~/wp-content/[^\s"\'<>\\\\]+/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
-        $string = preg_replace( $pattern_rel, $new_url, $string );
+        $pattern_rel = '~/wp-content/[^\s"\'<>\\\\]*?/' . $filename_quoted . '(?:-scaled)?(?:-rotated)?(?:-\d+x\d+)?\.(jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>\\\\]*)?~i';
+        $new_string = preg_replace( $pattern_rel, $new_url, $string );
+        if ( $new_string !== null ) { $string = $new_string; }
 
         // 4. Suppression srcset (devenu invalide)
-        $string = preg_replace(
+        $new_string = preg_replace(
             '/(<img[^>]+wp-image-' . $id . '[^>]+)srcset="[^"]*"/i',
             '$1',
             $string
         );
+        if ( $new_string !== null ) { $string = $new_string; }
 
         return $string;
     }
